@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dry Bulk Shipping RAG Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main>
+    <h1>Dry Bulk Shipping — RAG Search</h1>
+    <p class="subtitle">
+      Local, free RAG over Breakwave / Hellenic Shipping News / Splash247 articles.
+      Hybrid BM25 + dense retrieval with cross-encoder reranking finds the sources;
+      a local Ollama LLM ({{ ollama_model }}) writes the grounded, cited answer.
+    </p>
+
+    {% if not engine_ready %}
+      <div class="status-box">
+        <p><strong>Warming up:</strong> {{ engine_status }}</p>
+        <p class="muted">
+          First start loads/cleans ~49k articles and either loads the cached
+          embeddings or builds them (slow, one-time). This page refreshes
+          automatically.
+        </p>
+      </div>
+      <script>
+        setTimeout(function () {
+          fetch("/status").then(r => r.json()).then(d => {
+            if (d.ready) { window.location.reload(); }
+            else { setTimeout(() => window.location.reload(), 3000); }
+          });
+        }, 3000);
+      </script>
+    {% else %}
+      <form method="get" action="/" class="search-form">
+        <input
+          type="text" name="q" value="{{ query }}" autofocus
+          placeholder="e.g. Has the Baltic Dry Index been falling recently?"
+        >
+        <select name="n">
+          {% for n in [5, 6, 7, 8, 9, 10] %}
+            <option value="{{ n }}" {% if n == n_sources %}selected{% endif %}>{{ n }} sources</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Ask</button>
+      </form>
+
+      {% if error %}
+        <div class="error-box">
+          <strong>Something went wrong:</strong> {{ error }}
+        </div>
+      {% endif %}
+
+      {% if result %}
+        <section class="answer-box">
+          <h2>Answer</h2>
+          {% if result.recent %}
+            <p class="muted">
+              Recent question: only articles from {{ result.recent.label }} were searched
+              ({{ result.recent.n_articles }} articles, {{ result.recent.n_market }} of them market reports{% if result.recent.market_only %}; only the market reports were used for this market question{% endif %}).
+              {% if result.recent.stale %}
+                There are no articles from {{ result.recent.requested }} yet: the newest is from
+                {{ result.recent.latest.strftime('%d %B %Y') }}.
+              {% endif %}
+              {% if result.recent.fallback %}
+                Earlier months were included to get enough articles and market reports.
+              {% endif %}
+            </p>
+          {% endif %}
+          <p class="answer-text">{{ result.answer }}</p>
+          <p class="timing">
+            retrieval: {{ "%.0f"|format(result.retrieval_ms) }} ms
+            &middot; generation: {{ "%.0f"|format(result.generation_ms) }} ms
+          </p>
+        </section>
+
+        <section class="sources-box">
+          <h2>Sources ({{ result.sources|length }})</h2>
+          <p class="muted">
+            Top matching articles for this query, newest first. Citation numbers [n] in the
+            answer above refer to the 5 retrieved passages the model was
+            actually shown, not this list directly -- see "cited passages" below.
+          </p>
+          <ol class="sources-list">
+            {% for s in result.sources %}
+              <li>
+                <a href="{{ s.link }}" target="_blank" rel="noopener">{{ s.title }}</a>
+                <span class="meta">
+                  {{ s.source }}{% if s.date %}, {{ s.date.date() }}{% endif %}
+                  &middot; score {{ "%.3f"|format(s.score) }}
+                </span>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+
+        <section class="context-box">
+          <h2>Cited passages</h2>
+          <p class="muted">
+            The exact passages handed to the LLM as context, labeled to match
+            the [n] citations in the answer above.
+          </p>
+          <ol class="context-list">
+            {% for c in result.context_chunks %}
+              <li class="{% if loop.index in result.cited_chunk_numbers %}cited{% endif %}">
+                <div class="meta">
+                  [{{ loop.index }}]
+                  <a href="{{ c.link }}" target="_blank" rel="noopener">{{ c.title }}</a>
+                  &middot; {{ c.source }}{% if c.date %}, {{ c.date.date() }}{% endif %}
+                  &middot; score {{ "%.3f"|format(c.score) }}
+                  {% if loop.index in result.cited_chunk_numbers %}<span class="badge">cited</span>{% endif %}
+                </div>
+                <p class="chunk-text">{{ c.chunk_text }}</p>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+      {% endif %}
+    {% endif %}
+  </main>
+</body>
+</html>
