@@ -1,0 +1,53 @@
+{# One Osprey AI answer: notes, the answer, then its sources and the passages
+   it was given. Rendered by /api/answer and inserted into the chat. #}
+{% if result.corrected_question %}
+  <p class="msg-note">
+    Searched for <strong>{{ result.corrected_question }}</strong>
+    (spelling corrected: {% for orig, new in result.corrections %}{{ orig }} &rarr; {{ new }}{% if not loop.last %}, {% endif %}{% endfor %})
+  </p>
+{% endif %}
+{% if result.recent %}
+  <p class="msg-note">
+    Recent question: searched articles from {{ result.recent.label }}
+    ({{ result.recent.n_articles }} articles, {{ result.recent.n_market }} market reports{% if result.recent.market_only %}; market reports only{% endif %}).
+    {% if result.recent.stale %}
+      Nothing from {{ result.recent.requested }} yet: the newest article is from
+      {{ result.recent.latest.strftime('%d %B %Y') }}.
+    {% endif %}
+  </p>
+{% endif %}
+
+<div class="answer-text">{{ result.answer }}</div>
+
+<details class="msg-details">
+  <summary>Sources ({{ result.sources|length }})</summary>
+  <p class="muted details-note">The best-matching articles for this question, newest first.</p>
+  <ol class="sources-list">
+    {% for s in result.sources %}
+      <li>
+        <a href="{{ s.link }}" target="_blank" rel="noopener">{{ s.title }}</a>
+        <span class="meta">{{ s.source }}{% if s.date %}, {{ s.date.date() }}{% endif %} &middot; score {{ "%.3f"|format(s.score) }}</span>
+      </li>
+    {% endfor %}
+  </ol>
+</details>
+
+<details class="msg-details passages">
+  <summary>Passages used ({{ result.context_chunks|length }}){% if result.cited_chunk_numbers %} &middot; {{ result.cited_chunk_numbers|length }} cited{% endif %}</summary>
+  <p class="muted details-note">The exact passages the model was given; [n] in the answer refers to these.</p>
+  <ol class="context-list">
+    {% for c in result.context_chunks %}
+      <li data-n="{{ loop.index }}" class="{% if loop.index in result.cited_chunk_numbers %}cited{% endif %}">
+        <div class="meta">
+          [{{ loop.index }}]
+          <a href="{{ c.link }}" target="_blank" rel="noopener">{{ c.title }}</a>
+          &middot; {{ c.source }}{% if c.date %}, {{ c.date.date() }}{% endif %}
+          {% if loop.index in result.cited_chunk_numbers %}<span class="badge">cited</span>{% endif %}
+        </div>
+        <p class="chunk-text">{{ c.chunk_text }}</p>
+      </li>
+    {% endfor %}
+  </ol>
+</details>
+
+<p class="timing">retrieval {{ "%.1f"|format(result.retrieval_ms / 1000) }} s &middot; writing {{ "%.1f"|format(result.generation_ms / 1000) }} s</p>
