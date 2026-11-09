@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if article %}{{ article.title }} · {% endif %}{{ site_name }}</title>
+  <link rel="icon" href="{{ url_for('logo') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% set page = "article" %}
+  {% include "_topbar.html" %}
+
+  {% if not article %}
+    <main>
+      <div class="status-box">
+        <p><strong>Getting ready:</strong> {{ engine_status }}</p>
+        <p class="muted">The articles are still loading. This page refreshes automatically.</p>
+      </div>
+    </main>
+    <script>
+      (function poll() {
+        setTimeout(() => fetch({{ url_for('status')|tojson }}).then(r => r.json())
+          .then(d => d.ready ? location.reload() : poll()).catch(poll), 3000);
+      })();
+    </script>
+  {% else %}
+  <div class="article-layout">
+    <article class="article-main">
+      <p class="back-link"><a href="{{ url_for('home') }}">&larr; Dashboard</a></p>
+      <p class="article-kicker">
+        <span class="article-source">{{ article.source }}</span>
+        {% if article.date == article.date %}&middot; {{ article.date.strftime('%d %B %Y') }}{% endif %}
+        {% if article.author %}&middot; {{ article.author }}{% endif %}
+      </p>
+      <h1 class="article-title">{{ article.title }}</h1>
+      <a class="original-button" href="{{ article.link }}" target="_blank" rel="noopener">
+        Show original source
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+      </a>
+
+      <div class="article-body">
+        {% for p in article.paragraphs %}
+          <p data-n="{{ loop.index }}"><span class="para-num" aria-hidden="true">{{ loop.index }}</span>{{ p }}</p>
+        {% endfor %}
+      </div>
+      <p class="article-note muted">
+        Text as collected from {{ article.source }}; paragraph breaks are approximate and the numbers are
+        added by {{ site_name }} so the assistant can cite them. Read the original for the exact layout.
+      </p>
+    </article>
+
+    <aside class="article-chat" aria-label="Ask about this article">
+      <div class="side-chat-head">
+        <span class="brand-badge"><img src="{{ url_for('logo') }}" alt=""></span>
+        <div>
+          <strong>Ask about this article</strong>
+          <span class="muted">{{ site_name }} AI answers from this article only</span>
+        </div>
+        <button type="button" class="nav-button" id="clear-chat" title="Clear this chat">Clear</button>
+      </div>
+      <div class="side-chat-scroll" id="side-scroll">
+        <div class="chat-thread side" id="thread" aria-live="polite">
+          <section class="chat-empty side" id="empty">
+            <p class="muted">Ask anything about this article, or try:</p>
+            <div class="suggestions side">
+              {% for s in suggestions %}
+                <button type="button" class="suggestion">{{ s }}</button>
+              {% endfor %}
+            </div>
+          </section>
+        </div>
+      </div>
+      <form class="side-composer" id="composer">
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="Ask about this article..." aria-label="Your question about this article"></textarea>
+          <div class="composer-row">
+            <span class="composer-hint" id="engine-hint"></span>
+            <button type="submit" class="send-button" id="send" aria-label="Send">
+              <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+              <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+              <span class="stop-label">Stop</span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </aside>
+  </div>
+
+  {% if related %}
+  <section class="related">
+    <h2>More news from the same and previous days</h2>
+    {% for group in related %}
+      <h3 class="related-day">{{ group.label }} <span class="muted">&middot; {{ group.date.strftime('%A %d %B %Y') }}</span></h3>
+      <ul class="news-list">
+        {% for a in group.articles %}
+          <li>
+            <a href="{{ url_for('article', article_id=a.article_id) }}">{{ a.title }}</a>
+            <span class="meta">{{ a.source }}{% if a.is_market %} &middot; market report{% endif %}</span>
+            <p class="snippet">{{ a.snippet }}</p>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  <script src="{{ url_for('static', filename='chat.js') }}"></script>
+  <script>
+  (function () {
+    const chat = createOspreyChat({
+      thread: document.getElementById("thread"),
+      empty: document.getElementById("empty"),
+      form: document.getElementById("composer"),
+      input: document.getElementById("input"),
+      send: document.getElementById("send"),
+      hint: document.getElementById("engine-hint"),
+      scroller: document.getElementById("side-scroll"),
+      answerUrl: {{ url_for('api_article_answer', article_id=article.article_id)|tojson }},
+      statusUrl: {{ url_for('status')|tojson }},
+      cancelUrl: {{ url_for('api_cancel')|tojson }},
+      frames: {{ loading_frames|tojson }},
+      logo: {{ url_for('logo')|tojson }},
+      workingLabel: "Reading the article and writing the answer…",
+      citationTarget: (wrap, n) => document.querySelector('.article-body p[data-n="' + n + '"]'),
+    });
+    document.getElementById("clear-chat").addEventListener("click", chat.clear);
+  })();
+  </script>
+  {% endif %}
+</body>
+</html>

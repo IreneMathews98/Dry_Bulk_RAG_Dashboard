@@ -1,0 +1,9 @@
+{# One answer in an article page's side chat. Rendered by /api/article/<id>/answer;
+   [n] citations point at the article's numbered paragraphs. #}
+<div class="answer-text">{{ result.answer }}</div>
+<p class="timing">
+  {% if result.n_paragraphs_used < result.n_paragraphs %}
+    Long article: read the {{ result.n_paragraphs_used }} of {{ result.n_paragraphs }} paragraphs most relevant to the question &middot;
+  {% endif %}
+  writing {{ "%.1f"|format(result.generation_ms / 1000) }} s
+</p>

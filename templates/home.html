@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ site_name }} · Dry bulk market dashboard</title>
+  <link rel="icon" href="{{ url_for('logo') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% set page = "dashboard" %}
+  {% include "_topbar.html" %}
+
+  <main class="wide">
+    <section class="hero">
+      <div>
+        <h1>Dry bulk market</h1>
+        <p class="subtitle">
+          Spot timecharter averages and FFA forward prices, the latest market news, and an
+          AI assistant that answers from ~49k shipping articles with citations.
+        </p>
+      </div>
+      <a class="ask-button" href="{{ url_for('chat') }}">
+        <span class="brand-badge"><img src="{{ url_for('logo') }}" alt=""></span>
+        <span>
+          <span class="ask-title">Ask {{ site_name }} AI</span>
+          <span class="ask-sub">Questions about the market, answered from the news</span>
+        </span>
+        <svg class="ask-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </a>
+    </section>
+
+    <!-- ------------------------------------------------------------ prices -->
+    <section class="prices">
+      <h2>Freight prices</h2>
+      {% if prices %}
+        <p class="muted">
+          Daily Baltic spot timecharter averages and FFA forward assessments, $/day,
+          {{ prices.first }} to {{ prices.last }}. Changes compare each series with its own previous
+          trading day, the same day a week earlier and the same day a month earlier.
+        </p>
+
+        <div class="stat-tiles" id="stat-tiles"></div>
+
+        <div class="filter-row">
+          <div class="seg-control" id="range-control" role="group" aria-label="Time range"></div>
+          <div class="seg-control" id="view-control" role="group" aria-label="Measure"></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <h3 id="chart-title"></h3>
+            <div class="legend" id="legend"></div>
+          </div>
+          <div class="chart-wrap" id="chart-wrap">
+            <svg id="chart" role="img" aria-labelledby="chart-title"></svg>
+            <div class="tooltip" id="tooltip" hidden></div>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+        <table class="change-table" id="change-table">
+          <thead>
+            <tr><th>Series</th><th>As of</th><th class="num">Latest $/day</th>
+                <th class="num">Daily</th><th class="num">Week on week</th><th class="num">Month on month</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        </div>
+
+        <script id="price-data" type="application/json">{{ prices|tojson }}</script>
+      {% else %}
+        <div class="status-box">
+          Price data not found. Put <code>Freight data.csv</code>, <code>bfa_cape.csv</code>,
+          <code>bfa_panamax.csv</code> and <code>bfa_supramax.csv</code> in <code>data/</code>.
+        </div>
+      {% endif %}
+    </section>
+
+    <!-- -------------------------------------------------------------- news -->
+    <section class="news">
+      <h2>Latest news</h2>
+      {% if engine_ready %}
+        <div class="seg-control" role="tablist" aria-label="News filter">
+          <button type="button" role="tab" aria-selected="true" data-tab="market">Market reports</button>
+          <button type="button" role="tab" aria-selected="false" data-tab="all">All news</button>
+        </div>
+        {% for key, items in [("market", market_news), ("all", all_news)] %}
+          <ul class="news-list" data-panel="{{ key }}" {% if key != "market" %}hidden{% endif %}>
+            {% for a in items %}
+              <li>
+                <a href="{{ url_for('article', article_id=a.article_id) }}">{{ a.title }}</a>
+                <span class="meta">{{ a.source }}{% if a.date == a.date %}, {{ a.date.strftime('%d %b %Y') }}{% endif %}</span>
+                <p class="snippet">{{ a.snippet }}</p>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endfor %}
+      {% else %}
+        <div class="status-box">
+          <p class="muted">News appears once the article data has loaded ({{ engine_status }}). This section refreshes automatically.</p>
+        </div>
+        <script>
+          (function poll() {
+            setTimeout(function () {
+              fetch("{{ url_for('status') }}").then(r => r.json())
+                .then(d => d.ready ? window.location.reload() : poll())
+                .catch(poll);
+            }, 3000);
+          })();
+        </script>
+      {% endif %}
+    </section>
+  </main>
+
+  <script>
+  // News tabs
+  document.querySelectorAll(".news [role=tab]").forEach(tab => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".news [role=tab]").forEach(t => t.setAttribute("aria-selected", t === tab));
+      document.querySelectorAll(".news-list").forEach(p => { p.hidden = p.dataset.panel !== tab.dataset.tab; });
+    });
+  });
+  </script>
+
+  {% if prices %}
+  <script>
+  (function () {
+    const DATA = JSON.parse(document.getElementById("price-data").textContent);
+    const DAY = 864e5;
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const SHORT = ["Spot", "CURMON", "+1MON", "+2MON"];
+    const RANGES = [["1M", 1], ["3M", 3], ["6M", 6], ["1Y", 12], ["5Y", 60], ["All", null]];
+    const VIEWS = [["price", "Price"], ["daily", "Daily %"], ["wow", "Week on week %"], ["mom", "Month on month %"]];
+    const times = DATA.dates.map(d => Date.parse(d + "T00:00:00Z"));
+
+    const state = { seg: DATA.segments[0].key, range: "1Y", view: "price", hidden: new Set() };
+
+    // ---- series with their daily / week-on-week / month-on-month changes --------
+    function monthsBack(t, n) {
+      const d = new Date(t), day = d.getUTCDate();
+      d.setUTCDate(1);
+      d.setUTCMonth(d.getUTCMonth() - n);
+      const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+      d.setUTCDate(Math.min(day, last));
+      return d.getTime();
+    }
+    function lastAtOrBefore(pts, t) {           // index of the last point with pts[k].t <= t, or -1
+      let lo = 0, hi = pts.length - 1, k = -1;
+      while (lo <= hi) { const m = (lo + hi) >> 1; if (pts[m].t <= t) { k = m; lo = m + 1; } else hi = m - 1; }
+      return k;
+    }
+    const pct = (a, b) => (b ? (a / b - 1) * 100 : null);
+
+    const SERIES = {};
+    DATA.segments.forEach(seg => seg.series.forEach((s, slot) => {
+      const raw = DATA.values[s.id] || [];
+      const pts = [];
+      raw.forEach((v, i) => { if (v !== null) pts.push({ t: times[i], v }); });
+      pts.forEach((p, k) => {
+        p.daily = k > 0 ? pct(p.v, pts[k - 1].v) : null;
+        const w = lastAtOrBefore(pts, p.t - 7 * DAY);      // allow a few days' gap for holidays
+        p.wow = w >= 0 && p.t - 7 * DAY - pts[w].t <= 5 * DAY ? pct(p.v, pts[w].v) : null;
+        const mt = monthsBack(p.t, 1), m = lastAtOrBefore(pts, mt);
+        p.mom = m >= 0 && mt - pts[m].t <= 7 * DAY ? pct(p.v, pts[m].v) : null;
+      });
+      SERIES[s.id] = { ...s, slot: slot + 1, short: SHORT[slot], pts, byT: new Map(pts.map(p => [p.t, p])) };
+    }));
+
+    // ---- formatting -------------------------------------------------------------
+    const fmtUsd = v => "$" + Math.round(v).toLocaleString("en-US");
+    const fmtPct = v => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(1) + "%";
+    const fmtDate = t => new Date(t).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
+    function el(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+    function changeEl(v) {                      // arrow + sign + colour, never colour alone
+      if (v === null || v === undefined) return el("span", "chg flat", "—");
+      const dir = v > 0.05 ? "up" : v < -0.05 ? "down" : "flat";
+      const arrow = dir === "up" ? "▲ " : dir === "down" ? "▼ " : "";
+      const e = el("span", "chg " + dir, arrow + fmtPct(v));
+      e.setAttribute("aria-label", (dir === "down" ? "down " : dir === "up" ? "up " : "unchanged ") + Math.abs(v).toFixed(1) + " percent");
+      return e;
+    }
+    const segment = () => DATA.segments.find(s => s.key === state.seg);
+
+    // ---- stat tiles: latest spot level and its changes, one per vessel class -------
+    function renderTiles() {
+      const box = document.getElementById("stat-tiles");
+      box.replaceChildren();
+      DATA.segments.forEach(seg => {
+        const s = SERIES[seg.series[0].id], p = s.pts[s.pts.length - 1];
+        const tile = el("button", "stat-tile");
+        tile.type = "button";
+        tile.setAttribute("aria-pressed", seg.key === state.seg);
+        tile.append(el("span", "tile-label", seg.name + " · " + s.id));
+        tile.append(el("span", "tile-value", p ? fmtUsd(p.v) + "/day" : "—"));
+        tile.append(el("span", "tile-date", p ? "as of " + fmtDate(p.t) : ""));
+        const row = el("span", "tile-changes");
+        [["Day", "daily"], ["Week", "wow"], ["Month", "mom"]].forEach(([lbl, key]) => {
+          const c = el("span", "tile-chg");
+          c.append(el("span", "tile-chg-label", lbl), changeEl(p && p[key]));
+          row.append(c);
+        });
+        tile.append(row);
+        tile.addEventListener("click", () => { state.seg = seg.key; state.hidden.clear(); renderAll(); });
+        box.append(tile);
+      });
+    }
+
+    // ---- filter controls ------------------------------------------------------
+    function renderControl(id, options, key) {
+      const box = document.getElementById(id);
+      box.replaceChildren();
+      options.forEach(([value, label]) => {
+        const b = el("button", null, label);
+        b.type = "button";
+        b.setAttribute("aria-pressed", state[key] === value);
+        b.addEventListener("click", () => { state[key] = value; renderAll(); });
+        box.append(b);
+      });
+    }
+
+    function renderLegend() {
+      const box = document.getElementById("legend");
+      box.replaceChildren();
+      segment().series.forEach(meta => {
+        const s = SERIES[meta.id];
+        const b = el("button", "legend-item");
+        b.type = "button";
+        b.setAttribute("aria-pressed", !state.hidden.has(s.id));
+        b.title = "Show or hide " + s.label;
+        b.append(el("span", "key s" + s.slot), el("span", null, s.label));
+        b.addEventListener("click", () => {
+          state.hidden.has(s.id) ? state.hidden.delete(s.id) : state.hidden.add(s.id);
+          renderAll();
+        });
+        box.append(b);
+      });
+    }
+
+    function renderTable() {
+      const body = document.querySelector("#change-table tbody");
+      body.replaceChildren();
+      segment().series.forEach(meta => {
+        const s = SERIES[meta.id], p = s.pts[s.pts.length - 1];
+        const tr = el("tr");
+        const name = el("td");
+        name.append(el("span", "key s" + s.slot), document.createTextNode(s.label + " (" + s.id + ")"));
+        tr.append(name, el("td", null, p ? fmtDate(p.t) : "—"), el("td", "num", p ? fmtUsd(p.v) : "—"));
+        ["daily", "wow", "mom"].forEach(k => { const td = el("td", "num"); td.append(changeEl(p && p[k])); tr.append(td); });
+        body.append(tr);
+      });
+    }
+
+    // ---- chart --------------------------------------------------------------
+    function niceTicks(lo, hi, count) {
+      if (lo === hi) { lo -= 1; hi += 1; }
+      const raw = (hi - lo) / count, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+      const ticks = [];
+      for (let v = Math.floor(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(+v.toFixed(10));
+      if (ticks[ticks.length - 1] < hi) ticks.push(ticks[ticks.length - 1] + step);
+      return ticks;
+    }
+    function dateTicks(t0, t1, width) {
+      const n = Math.max(2, Math.floor(width / 110)), span = t1 - t0, ticks = [];
+      const monthsPer = [1, 2, 3, 6, 12, 24, 36, 60].find(m => span / (m * 30.4 * DAY) <= n) || 60;
+      if (span <= 62 * DAY) {                                    // short ranges: weekly / fortnightly ticks
+        const step = (span <= 35 * DAY ? 7 : 14) * DAY;
+        for (let t = t0; t <= t1; t += step) ticks.push(t);
+        return { ticks, fmt: t => new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }) };
+      }
+      const d = new Date(t0);
+      let t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+      while (t <= t1) {
+        const m = new Date(t).getUTCMonth();
+        if (m % monthsPer === 0) ticks.push(t);
+        t = Date.UTC(new Date(t).getUTCFullYear(), m + 1, 1);
+      }
+      const yearly = monthsPer >= 12;
+      return { ticks, fmt: t => new Date(t).toLocaleDateString("en-GB", yearly ? { year: "numeric", timeZone: "UTC" } : { month: "short", year: "2-digit", timeZone: "UTC" }) };
+    }
+    function svg(tag, attrs, parent) {
+      const e = document.createElementNS(SVG_NS, tag);
+      Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
+      if (parent) parent.append(e);
+      return e;
+    }
+
+    const metricOf = p => (state.view === "price" ? p.v : p[state.view]);
+    const fmtMetric = v => (state.view === "price" ? fmtUsd(v) : fmtPct(v));
+
+    function renderChart() {
+      const seg = segment();
+      const viewLabel = VIEWS.find(v => v[0] === state.view)[1];
+      document.getElementById("chart-title").textContent =
+        seg.name + ": spot vs FFA, " + (state.view === "price" ? "$/day" : viewLabel.replace(" %", " change, %"));
+
+      const wrap = document.getElementById("chart-wrap"), chart = document.getElementById("chart");
+      const W = wrap.clientWidth, H = W < 560 ? 240 : 340;
+      const M = { l: 58, r: 62, t: 12, b: 28 };
+      chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+      chart.setAttribute("width", W); chart.setAttribute("height", H);
+      chart.replaceChildren();
+
+      const all = seg.series.map(m => SERIES[m.id]);
+      const end = Math.max(...all.map(s => (s.pts.length ? s.pts[s.pts.length - 1].t : -Infinity)));
+      const months = RANGES.find(r => r[0] === state.range)[1];
+      const start = months ? monthsBack(end, months) : Math.min(...all.map(s => (s.pts.length ? s.pts[0].t : Infinity)));
+
+      const visible = all.filter(s => !state.hidden.has(s.id)).map(s => ({
+        s, pts: s.pts.filter(p => p.t >= start && p.t <= end && metricOf(p) !== null),
+      })).filter(v => v.pts.length);
+
+      if (!visible.length) {
+        svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle", class: "axis-label" }, chart).textContent = "No data for this selection";
+        chart.onpointermove = null;
+        return;
+      }
+
+      let lo = Infinity, hi = -Infinity;
+      visible.forEach(v => v.pts.forEach(p => { const y = metricOf(p); lo = Math.min(lo, y); hi = Math.max(hi, y); }));
+      if (state.view !== "price") { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+      const yt = niceTicks(lo, hi, 5);
+      const y0 = yt[0], y1 = yt[yt.length - 1];
+      const X = t => M.l + ((t - start) / Math.max(end - start, DAY)) * (W - M.l - M.r);
+      const Y = v => M.t + (1 - (v - y0) / (y1 - y0)) * (H - M.t - M.b);
+
+      // grid + y axis
+      const grid = svg("g", {}, chart);
+      yt.forEach(v => {
+        svg("line", { x1: M.l, x2: W - M.r, y1: Y(v), y2: Y(v), class: v === 0 && state.view !== "price" ? "zero-line" : "grid-line" }, grid);
+        svg("text", { x: M.l - 8, y: Y(v) + 4, "text-anchor": "end", class: "axis-label" }, grid).textContent =
+          state.view === "price" ? (Math.abs(v) >= 1000 ? "$" + (v / 1000).toLocaleString("en-US") + "k" : "$" + v) : fmtPct(v).replace(".0%", "%");
+      });
+      const dt = dateTicks(start, end, W - M.l - M.r);
+      dt.ticks.forEach(t => {
+        svg("text", { x: X(t), y: H - 8, "text-anchor": "middle", class: "axis-label" }, grid).textContent = dt.fmt(t);
+      });
+      svg("line", { x1: M.l, x2: W - M.r, y1: H - M.b, y2: H - M.b, class: "baseline" }, grid);
+
+      // lines (broken across gaps longer than 3 weeks)
+      visible.forEach(({ s, pts }) => {
+        let d = "";
+        pts.forEach((p, k) => {
+          const gap = k > 0 && p.t - pts[k - 1].t > 21 * DAY;
+          d += (k === 0 || gap ? "M" : "L") + X(p.t).toFixed(1) + "," + Y(metricOf(p)).toFixed(1);
+        });
+        svg("path", { d, class: "line s" + s.slot }, chart);
+      });
+
+      // direct labels at the right end, pushed apart so they don't overlap
+      const labels = visible.map(({ s, pts }) => ({ s, y: Y(metricOf(pts[pts.length - 1])) })).sort((a, b) => a.y - b.y);
+      for (let k = 1; k < labels.length; k++) labels[k].y = Math.max(labels[k].y, labels[k - 1].y + 13);
+      labels.forEach(({ s, y }) => {
+        svg("text", { x: W - M.r + 6, y: y + 4, class: "direct-label" }, chart).textContent = s.short;
+      });
+
+      // hover: crosshair snapped to the nearest date, one tooltip listing every visible series
+      const hoverTimes = [...new Set(visible.flatMap(v => v.pts.map(p => p.t)))].sort((a, b) => a - b);
+      const hoverPts = hoverTimes.map(t => ({ t }));
+      const cross = svg("line", { y1: M.t, y2: H - M.b, class: "crosshair", visibility: "hidden" }, chart);
+      const dots = visible.map(({ s }) => svg("circle", { r: 4, class: "dot s" + s.slot, visibility: "hidden" }, chart));
+      const tip = document.getElementById("tooltip");
+
+      function hide() { cross.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); tip.hidden = true; }
+      chart.onpointerleave = hide;
+      chart.onpointermove = ev => {
+        const rect = chart.getBoundingClientRect();
+        const px = (ev.clientX - rect.left) * (W / rect.width);
+        if (px < M.l - 10 || px > W - M.r + 10) return hide();
+        const tGuess = start + ((px - M.l) / (W - M.l - M.r)) * (end - start);
+        let k = Math.max(0, Math.min(hoverTimes.length - 1, lastAtOrBefore(hoverPts, tGuess)));
+        if (k + 1 < hoverTimes.length && Math.abs(hoverTimes[k + 1] - tGuess) < Math.abs(hoverTimes[k] - tGuess)) k++;
+        const t = hoverTimes[k], x = X(t);
+        cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
+
+        tip.replaceChildren(el("div", "tip-date", fmtDate(t)));
+        visible.forEach(({ s }, i) => {
+          const p = s.byT.get(t), val = p ? metricOf(p) : null;
+          if (val === null || val === undefined) { dots[i].setAttribute("visibility", "hidden"); }
+          else { dots[i].setAttribute("cx", x); dots[i].setAttribute("cy", Y(val)); dots[i].setAttribute("visibility", "visible"); }
+          const row = el("div", "tip-row");
+          row.append(el("span", "key s" + s.slot), el("strong", null, val === null || val === undefined ? "—" : fmtMetric(val)), el("span", "tip-label", s.label));
+          tip.append(row);
+          if (p && state.view === "price") {
+            const ch = el("div", "tip-changes");
+            [["D", "daily"], ["W", "wow"], ["M", "mom"]].forEach(([lbl, key]) => { ch.append(el("span", "tip-chg-label", lbl), changeEl(p[key])); });
+            tip.append(ch);
+          } else if (p) {
+            tip.append(el("div", "tip-changes muted", "price " + fmtUsd(p.v)));
+          }
+        });
+        tip.hidden = false;
+        const tipW = tip.offsetWidth, left = x / (W / rect.width);
+        tip.style.left = (left + 14 + tipW > rect.width ? left - tipW - 14 : left + 14) + "px";
+        tip.style.top = M.t + "px";
+      };
+    }
+
+    function renderAll() {
+      renderTiles();
+      renderControl("range-control", RANGES.map(r => [r[0], r[0]]), "range");
+      renderControl("view-control", VIEWS, "view");
+      renderLegend();
+      renderChart();
+      renderTable();
+    }
+
+    renderAll();
+    new ResizeObserver(() => renderChart()).observe(document.getElementById("chart-wrap"));
+  })();
+  </script>
+  {% endif %}
+</body>
+</html>
